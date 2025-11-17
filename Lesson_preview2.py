@@ -1,0 +1,2 @@
+# 本例子用于展示通过tushare接口获取螺纹钢期货主连历史数据，并用Backtrader进行简单的回测。回测的策略是基于5日均线和20日均线的交叉策略。
+import tushare as ts
