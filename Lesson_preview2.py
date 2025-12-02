@@ -11,9 +11,13 @@ plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 # 加载tushare token
 def load_tushare_token(token_file='Data/tushare_token.json'):
     try:
+        # 读取文件内容并移除注释行
         with open(token_file, 'r', encoding='utf-8') as f:
-            token_data = json.load(f)
-            return token_data.get('token', '')
+            lines = [line for line in f if not line.strip().startswith('//')]
+            content = ''.join(lines)
+            token_data = json.loads(content)
+            # 使用正确的字段名
+            return token_data.get('tushare_token', '')
     except Exception as e:
         print(f"加载token文件失败: {e}")
         return ''
@@ -21,49 +25,123 @@ def load_tushare_token(token_file='Data/tushare_token.json'):
 # 设置tushare token
 token = load_tushare_token()
 if token:
-    ts.set_token(token)
-    pro = ts.pro_api()
+    try:
+        ts.set_token(token)
+        pro = ts.pro_api()
+        print("Tushare API初始化成功")
+    except Exception as e:
+        print(f"Tushare API初始化失败: {e}")
+        # 即使初始化失败，我们仍然可以尝试使用本地CSV文件
+        pro = None
 else:
-    print("请在Data/tushare_token.json文件中设置有效的tushare token")
-    exit()
+    print("未找到有效的tushare token，将尝试使用本地CSV文件数据")
+    pro = None
 
-# 从tushare获取螺纹钢期货主力期货指数数据
+# 从tushare获取螺纹钢期货主力期货指数数据，失败时尝试使用本地CSV文件
 def get_rb_index_data(start_date='20200101', end_date=None):
-    if end_date is None:
-        end_date = datetime.datetime.now().strftime('%Y%m%d')
+    # 首先尝试从tushare获取数据
+    try:
+        if end_date is None:
+            end_date = datetime.datetime.now().strftime('%Y%m%d')
+        
+        # 螺纹钢期货主力期货指数的代码为RB.SHF
+        df = pro.fut_daily(
+            ts_code='RB.SHF',
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        # 数据处理
+        if not df.empty:
+            # 重命名列以便Backtrader使用
+            df = df.rename(columns={
+                'trade_date': 'date',
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'vol': 'volume'
+            })
+            
+            # 将日期列转换为datetime格式
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # 按照日期排序
+            df = df.sort_values('date')
+            
+            # 设置索引
+            df.set_index('date', inplace=True)
+            
+            print("成功从tushare获取数据")
+            return df
+    except Exception as e:
+        print(f"从tushare获取数据失败: {e}")
     
-    # 螺纹钢期货主力期货指数的代码为RB.SHF
-    df = pro.fut_daily(
-        ts_code='RB.SHF',
-        start_date=start_date,
-        end_date=end_date
-    )
-    
-    # 数据处理
-    if df.empty:
-        print("未能获取到螺纹钢期货主力期货指数数据")
+    # 如果tushare获取失败，尝试使用本地CSV文件
+    print("尝试使用本地CSV文件数据...")
+    try:
+        # 尝试读取Data目录下的RB9999.csv文件
+        csv_file = 'Data/RB9999.csv'
+        df = pd.read_csv(csv_file)
+        
+        if df.empty:
+            print("本地CSV文件为空")
+            return None
+        
+        # 根据常见的CSV格式进行处理
+        # 假设CSV文件的列名可能是以下几种格式之一
+        if 'date' in df.columns:
+            date_col = 'date'
+        elif 'trade_date' in df.columns:
+            date_col = 'trade_date'
+        elif 'datetime' in df.columns:
+            date_col = 'datetime'
+        elif '时间' in df.columns:
+            date_col = '时间'
+        else:
+            # 默认使用第一列作为日期列
+            date_col = df.columns[0]
+        
+        # 重命名必要的列
+        column_mapping = {}
+        for old_col, new_col in [
+            (date_col, 'date'),
+            ('open', 'open'), ('开盘价', 'open'), ('开盘', 'open'),
+            ('high', 'high'), ('最高价', 'high'),
+            ('low', 'low'), ('最低价', 'low'),
+            ('close', 'close'), ('收盘价', 'close'), ('收盘', 'close'),
+            ('volume', 'volume'), ('成交量', 'volume'), ('vol', 'volume')
+        ]:
+            if old_col in df.columns:
+                column_mapping[old_col] = new_col
+        
+        df = df.rename(columns=column_mapping)
+        
+        # 确保必要的列存在
+        required_cols = ['date', 'open', 'high', 'low', 'close']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            print(f"本地CSV文件缺少必要的列: {missing_cols}")
+            return None
+        
+        # 将日期列转换为datetime格式
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 如果没有volume列，添加一个默认值
+        if 'volume' not in df.columns:
+            df['volume'] = 0
+        
+        # 按照日期排序
+        df = df.sort_values('date')
+        
+        # 设置索引
+        df.set_index('date', inplace=True)
+        
+        print(f"成功从本地CSV文件获取数据，共{len(df)}条记录")
+        return df
+    except Exception as e:
+        print(f"读取本地CSV文件失败: {e}")
         return None
-    
-    # 重命名列以便Backtrader使用
-    df = df.rename(columns={
-        'trade_date': 'date',
-        'open': 'open',
-        'high': 'high',
-        'low': 'low',
-        'close': 'close',
-        'vol': 'volume'
-    })
-    
-    # 将日期列转换为datetime格式
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # 按照日期排序
-    df = df.sort_values('date')
-    
-    # 设置索引
-    df.set_index('date', inplace=True)
-    
-    return df
 
 # 定义策略类
 class SmaCrossStrategy(bt.Strategy):
@@ -135,21 +213,28 @@ class SmaCrossStrategy(bt.Strategy):
         if not trade.isclosed:
             return
         
-        # 检查是否为非当日平仓，如果是则调整佣金为0
-        is_same_day_trade = trade.open_datetime.date() == trade.close_datetime.date()
+        # 使用self.trade_entry_date来判断是否为当日平仓
+        # 如果没有记录入场日期，默认按非当日平仓处理
+        is_same_day_trade = False
+        if hasattr(self, 'trade_entry_date') and self.trade_entry_date is not None:
+            current_date = self.datas[0].datetime.date(0)
+            # 比较入场日期和当前日期是否为同一天
+            is_same_day_trade = self.trade_entry_date == current_date
         
-        # 如果不是当日交易，重新计算佣金
-        if not is_same_day_trade:
-            # 只保留买入佣金，卖出佣金设为0
-            original_commission = trade.commission
-            adjusted_commission = 6.2  # 只保留买入佣金
-            trade.commission = adjusted_commission
-            
-            # 重新计算净利润
-            adjusted_pnlcomm = trade.pnl - adjusted_commission
-            self.log(f'交易利润, 毛利润={trade.pnl:.2f}, 调整后佣金={adjusted_commission:.2f}, 调整后净利润={adjusted_pnlcomm:.2f} (非当日平仓)')
-        else:
-            self.log(f'交易利润, 毛利润={trade.pnl:.2f}, 净利润={trade.pnlcomm:.2f} (当日平仓)')
+        # 计算实际的交易佣金
+        actual_commission = 6.2  # 默认佣金为6.2元（仅买入费用）
+        if is_same_day_trade:
+            actual_commission = 12.4  # 当日平仓收取买入和卖出各6.2元
+        
+        # 计算调整后的净利润
+        adjusted_pnlcomm = trade.pnl - actual_commission
+        
+        # 输出交易信息
+        trade_type = "当日平仓" if is_same_day_trade else "非当日平仓"
+        self.log(f'交易利润, 毛利润={trade.pnl:.2f}, 调整后佣金={actual_commission:.2f}, 调整后净利润={adjusted_pnlcomm:.2f} ({trade_type})')
+        
+        # 重置入场日期
+        self.trade_entry_date = None
     
     def next(self):
         """策略核心逻辑"""
@@ -201,13 +286,14 @@ def main():
     cerebro.broker.setcash(100000.0)
     
     # 设置自定义佣金：每手买入6.2元，当日平仓6.2元，非当日平仓免费
+    # 保证金计算：价格 * 10 * 0.17
     class CommInfoFutures(bt.CommInfoBase):
         params = (
             ('stocklike', False),  # 期货模式
             ('commtype', bt.CommInfoBase.COMM_FIXED),  # 固定佣金
             ('commission', 6.2),  # 基础佣金（买入和当日平仓）
-            ('mult', 1),  # 合约乘数
-            ('margin', 0),  # 保证金率
+            ('mult', 10),  # 合约乘数
+            ('margin', 0.17),  # 保证金率
         )
         
         def _getcommission(self, size, price, pseudoexec):
@@ -217,6 +303,17 @@ def main():
             # 卖出订单先按6.2元/手收费，后续在notify_order中会根据是否为当日平仓调整
             elif size < 0:
                 return 6.2  # 卖出暂时收费，后续会在策略中调整
+        
+        def getsizing(self, price, cash, data=None):
+            # 计算可买入的合约数量，基于可用现金和保证金要求
+            # 保证金 = 价格 * 合约乘数 * 保证金率 = 价格 * 10 * 0.17
+            margin_per_contract = price * self.params.mult * self.params.margin
+            if margin_per_contract == 0:
+                return 0
+            # 确保有足够的现金支付保证金和佣金
+            available_cash = cash - 6.2  # 预留佣金
+            contracts = int(available_cash / margin_per_contract)
+            return contracts
     
     # 创建佣金对象并设置到broker
     comminfo = CommInfoFutures()
@@ -264,7 +361,11 @@ def main():
     
     # 绘制回测结果
     print("\n绘制回测结果...")
-    cerebro.plot(style='candlestick')
+    try:
+        cerebro.plot(style='line', figsize=(12, 8))
+    except Exception as e:
+        print(f"绘图时出现错误: {e}")
+        print("跳过绘图步骤，但回测数据已计算完成")
 
 if __name__ == '__main__':
     main()
