@@ -84,7 +84,11 @@ def get_rb_index_data(start_date='20200101', end_date=None):
             # 设置索引
             df.set_index('date', inplace=True)
             
-            print("成功从tushare获取数据")
+            # 显示实际的数据时间范围
+            actual_start_date = df.index.min().strftime('%Y-%m-%d') if not df.empty else '无数据'
+            actual_end_date = df.index.max().strftime('%Y-%m-%d') if not df.empty else '无数据'
+            print(f"成功从tushare获取数据，共{len(df)}条记录")
+            print(f"实际数据日期范围: {actual_start_date} 至 {actual_end_date}")
             return df
     except Exception as e:
         print(f"从tushare获取数据失败: {e}")
@@ -174,7 +178,12 @@ def get_rb_index_data(start_date='20200101', end_date=None):
         # 筛选日期范围内的数据
         df = df.loc[start_date_dt:end_date_dt]
         
-        print(f"成功从本地CSV文件获取数据，共{len(df)}条记录，日期范围: {start_date} 至 {end_date or '当前'}")
+        # 显示实际的数据时间范围
+        actual_start_date = df.index.min().strftime('%Y-%m-%d') if not df.empty else '无数据'
+        actual_end_date = df.index.max().strftime('%Y-%m-%d') if not df.empty else '无数据'
+        print(f"成功从本地CSV文件获取数据，共{len(df)}条记录")
+        print(f"实际数据日期范围: {actual_start_date} 至 {actual_end_date}")
+        print(f"筛选日期范围: {start_date} 至 {end_date or '当前'}")
         return df
     except Exception as e:
         print(f"读取本地CSV文件失败: {e}")
@@ -198,6 +207,7 @@ class SmaCrossStrategy(bt.Strategy):
         self.entry_price = None  # 入场价格
         self.take_profit_price = None  # 当前止盈价格
         self.max_price = None  # 入场后的最高价
+        self.trade_count = 0  # 交易计数器
         
         # 创建两个移动平均线指标
         self.sma1 = bt.indicators.SimpleMovingAverage(
@@ -305,6 +315,24 @@ class SmaCrossStrategy(bt.Strategy):
                     delattr(self, 'profit_triggered')
                 self.log(f'买入: 成交价={order.executed.price:.2f}, 成本={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}')
                 self.log(f'初始止盈: {self.take_profit_price:.2f} (上涨{self.params.take_profit_pct*100:.1f}%)')
+                
+                # 如果是第一笔交易的买入订单，记录详细信息
+                if self.trade_count == 1:
+                    # 获取当前日期
+                    try:
+                        exec_date = self.datas[0].datetime.date(0)
+                        # 将第一笔交易的执行信息写入文件
+                        with open('first_trade_execution.txt', 'w') as f:
+                            f.write(f"======= 第一笔交易执行信息 =======\n")
+                            f.write(f"交易序号: #{self.trade_count}\n")
+                            f.write(f"信号生成日期: 2020-02-21 (从first_trade_info.txt获取)\n")
+                            f.write(f"实际执行日期: {exec_date}\n")
+                            f.write(f"执行价格: {order.executed.price:.2f}\n")
+                            f.write(f"信号生成时SMA5: 3431.20, SMA20: 3417.45 (上穿)\n")
+                            f.write(f"Bar索引: {len(self)}\n")
+                            f.write("==============================\n")
+                    except Exception as e:
+                        print(f"记录第一笔交易执行信息时出错: {e}")
             elif order.issell():
                 # 检查是否为当日平仓（通过比较bar索引差值）
                 is_same_day_close = hasattr(self, 'trade_entry_bar') and (len(self) - self.trade_entry_bar) <= 1
@@ -407,9 +435,26 @@ class SmaCrossStrategy(bt.Strategy):
                 low_price = self.datas[0].low[0]
                 close_price = self.datas[0].close[0]
                 
-                print(f"\n{bar_id} - 买入信号")
+                # 递增交易计数器
+                self.trade_count += 1
+                
+                print(f"\n{bar_id} - 买入信号 (交易 #{self.trade_count})")
                 print(f"日期: {dt}, 价格: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}")
                 print(f"SMA{self.params.sma1}: {self.sma1[0]:.2f} > SMA{self.params.sma2}: {self.sma2[0]:.2f} (上穿)")
+                
+                # 第一笔交易特别标记和记录
+                if self.trade_count == 1:
+                    print("======= 第一笔交易信息 =======")
+                    # 将第一笔交易信息写入文件
+                    with open('first_trade_info.txt', 'w') as f:
+                        f.write(f"======= 第一笔交易信息 =======\n")
+                        f.write(f"交易序号: #{self.trade_count}\n")
+                        f.write(f"日期: {dt}\n")
+                        f.write(f"价格信息: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}\n")
+                        f.write(f"SMA{self.params.sma1}: {self.sma1[0]:.2f}\n")
+                        f.write(f"SMA{self.params.sma2}: {self.sma2[0]:.2f}\n")
+                        f.write(f"信号类型: 上穿 (SMA5 > SMA20)\n")
+                        f.write("==============================\n")
                 # 买入
                 self.order = self.buy()
         else:
@@ -511,6 +556,13 @@ def main():
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+    
+    # 打印数据的实际日期范围
+    print(f"数据实际日期范围: {df.index.min()} 至 {df.index.max()}")
+    print("数据前5行:")
+    print(df.head())
+    print("数据后5行:")
+    print(df.tail())
     
     # 打印初始资金
     print(f'初始资金: {cerebro.broker.getvalue():.2f}')

@@ -1,0 +1,32 @@
+# 忽略所有文本文件
+*.txt
+
+# 忽略Python编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 测试目录
+.coverage
+.pytest_cache/
+
+# IDE相关文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统相关文件
+.DS_Store
+Thumbs.db
+
+# 环境文件
+.env
+venv/
+env/
+
+# 日志文件
+*.log
