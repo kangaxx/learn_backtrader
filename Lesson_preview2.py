@@ -157,9 +157,6 @@ class SmaCrossStrategy(bt.Strategy):
         # 跟踪订单
         self.order = None
         
-        # 跟踪持仓入场日期（用于判断是否为当日平仓）
-        self.trade_entry_date = None
-        
         # 创建两个移动平均线指标
         self.sma1 = bt.indicators.SimpleMovingAverage(
             self.datas[0].close, period=self.params.sma1
@@ -173,8 +170,17 @@ class SmaCrossStrategy(bt.Strategy):
     
     def _log(self, txt, dt=None):
         """记录策略日志"""
-        dt = dt or self.datas[0].datetime.date(0)
-        print(f'{dt.isoformat()}, {txt}')
+        # 获取当前日期，确保格式正确
+        if dt is None:
+            try:
+                dt = self.datas[0].datetime.date(0)
+                # 检查日期是否为1970年（可能是解析错误）
+                if dt.year == 1970:
+                    # 使用回测中的索引位置作为替代标识
+                    dt = f"Bar#{len(self)}"
+            except:
+                dt = f"Bar#{len(self)}"
+        print(f'{dt}, {txt}')
     
     def notify_order(self, order):
         """订单通知"""
@@ -182,21 +188,20 @@ class SmaCrossStrategy(bt.Strategy):
             # 订单已经提交或接受，不需要处理
             return
         
+        # 获取当前的bar索引作为标识
+        bar_id = f"Bar#{len(self)}"
+        
         # 检查订单是否已完成
         if order.status in [order.Completed]:
-            current_date = self.datas[0].datetime.date(0)
-            
-            if order.isbuy():  # 买入
-                # 记录买入日期，用于判断是否为当日平仓
-                self.trade_entry_date = current_date
+            # 对于买入订单，记录当前的bar索引作为标识
+            if order.isbuy():
+                self.trade_entry_bar = len(self)
                 self.log(f'买入: 价格={order.executed.price:.2f}, 成本={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}')
-            elif order.issell():  # 卖出
-                # 检查是否为当日平仓
-                is_same_day_close = self.trade_entry_date == current_date
+            elif order.issell():
+                # 检查是否为当日平仓（通过比较bar索引差值）
+                # 在日线数据中，当日内交易通常发生在同一个bar或相邻的bar
+                is_same_day_close = hasattr(self, 'trade_entry_bar') and (len(self) - self.trade_entry_bar) <= 1
                 self.log(f'卖出: 价格={order.executed.price:.2f}, 收入={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}, 当日平仓={is_same_day_close}')
-                # 如果不是当日平仓，重新计算佣金为0
-                if not is_same_day_close:
-                    order.executed.comm = 0.0
             
             # 记录订单完成的时间
             self.bar_executed = len(self)
@@ -213,13 +218,11 @@ class SmaCrossStrategy(bt.Strategy):
         if not trade.isclosed:
             return
         
-        # 使用self.trade_entry_date来判断是否为当日平仓
-        # 如果没有记录入场日期，默认按非当日平仓处理
+        # 使用bar索引来判断是否为当日平仓（在日线数据中，当日内交易通常发生在相邻的bar）
         is_same_day_trade = False
-        if hasattr(self, 'trade_entry_date') and self.trade_entry_date is not None:
-            current_date = self.datas[0].datetime.date(0)
-            # 比较入场日期和当前日期是否为同一天
-            is_same_day_trade = self.trade_entry_date == current_date
+        if hasattr(self, 'trade_entry_bar'):
+            bar_diff = len(self) - self.trade_entry_bar
+            is_same_day_trade = bar_diff <= 1
         
         # 计算实际的交易佣金
         actual_commission = 6.2  # 默认佣金为6.2元（仅买入费用）
@@ -229,12 +232,19 @@ class SmaCrossStrategy(bt.Strategy):
         # 计算调整后的净利润
         adjusted_pnlcomm = trade.pnl - actual_commission
         
-        # 输出交易信息
+        # 输出交易信息，使用清晰的格式
         trade_type = "当日平仓" if is_same_day_trade else "非当日平仓"
-        self.log(f'交易利润, 毛利润={trade.pnl:.2f}, 调整后佣金={actual_commission:.2f}, 调整后净利润={adjusted_pnlcomm:.2f} ({trade_type})')
+        print(f"{'='*60}")
+        print(f"交易完成 - {trade_type}")
+        print(f"Bar: {len(self)}")
+        print(f"毛利润: {trade.pnl:.2f}")
+        print(f"佣金: {actual_commission:.2f}")
+        print(f"净利润: {adjusted_pnlcomm:.2f}")
+        print(f"{'='*60}")
         
-        # 重置入场日期
-        self.trade_entry_date = None
+        # 重置入场标识
+        if hasattr(self, 'trade_entry_bar'):
+            delattr(self, 'trade_entry_bar')
     
     def next(self):
         """策略核心逻辑"""
@@ -242,17 +252,22 @@ class SmaCrossStrategy(bt.Strategy):
         if self.order:
             return
         
+        # 获取当前bar索引作为标识
+        bar_id = f"Bar#{len(self)}"
+        
         # 检查当前是否持仓
         if not self.position:
             # 没有持仓，检查是否有买入信号（短期均线上穿长期均线）
             if self.crossover > 0:
-                self.log(f'买入信号: SMA{self.params.sma1}({self.sma1[0]:.2f}) 上穿 SMA{self.params.sma2}({self.sma2[0]:.2f})')
+                print(f"\n{bar_id} - 买入信号")
+                print(f"SMA{self.params.sma1}: {self.sma1[0]:.2f} > SMA{self.params.sma2}: {self.sma2[0]:.2f} (上穿)")
                 # 买入
                 self.order = self.buy()
         else:
             # 有持仓，检查是否有卖出信号（短期均线下穿长期均线）
             if self.crossover < 0:
-                self.log(f'卖出信号: SMA{self.params.sma1}({self.sma1[0]:.2f}) 下穿 SMA{self.params.sma2}({self.sma2[0]:.2f})')
+                print(f"\n{bar_id} - 卖出信号")
+                print(f"SMA{self.params.sma1}: {self.sma1[0]:.2f} < SMA{self.params.sma2}: {self.sma2[0]:.2f} (下穿)")
                 # 卖出
                 self.order = self.sell()
 
@@ -337,10 +352,16 @@ def main():
     print(f'最终资金: {cerebro.broker.getvalue():.2f}')
     
     # 打印性能指标
-    print("\n性能指标:")
-    returns = strategy.analyzers.returns.get_analysis()
-    print(f"总回报率: {returns['rtot']*100:.2f}%")
-    print(f"年化回报率: {returns['rnorm100']:.2f}%")
+    print("\n" + "="*60)
+    print("性能指标")
+    print("="*60)
+    
+    try:
+        returns = strategy.analyzers.returns.get_analysis()
+        print(f"总回报率: {returns['rtot']*100:.2f}%")
+        print(f"年化回报率: {returns['rnorm100']:.2f}%")
+    except Exception as e:
+        print(f"计算回报率时出错: {e}")
     
     try:
         sharpe = strategy.analyzers.sharpe.get_analysis()
@@ -348,16 +369,24 @@ def main():
     except:
         print("无法计算夏普比率")
     
-    drawdown = strategy.analyzers.drawdown.get_analysis()
-    print(f"最大回撤: {drawdown['max']['drawdown']:.2f}%")
-    print(f"最大回撤持续时间: {drawdown['max']['len']} 天")
+    try:
+        drawdown = strategy.analyzers.drawdown.get_analysis()
+        print(f"最大回撤: {drawdown['max']['drawdown']:.2f}%")
+        print(f"最大回撤持续时间: {drawdown['max']['len']} 个交易日")
+    except Exception as e:
+        print(f"计算回撤时出错: {e}")
     
-    trades = strategy.analyzers.trades.get_analysis()
-    if 'total' in trades and 'closed' in trades['total']:
-        print(f"交易次数: {trades['total']['closed']}")
-        if 'won' in trades and 'total' in trades['won']:
-            win_rate = trades['won']['total'] / trades['total']['closed'] * 100 if trades['total']['closed'] > 0 else 0
-            print(f"胜率: {win_rate:.2f}%")
+    try:
+        trades = strategy.analyzers.trades.get_analysis()
+        if 'total' in trades and 'closed' in trades['total']:
+            print(f"交易次数: {trades['total']['closed']}")
+            if 'won' in trades and 'total' in trades['won']:
+                win_rate = trades['won']['total'] / trades['total']['closed'] * 100 if trades['total']['closed'] > 0 else 0
+                print(f"胜率: {win_rate:.2f}%")
+    except Exception as e:
+        print(f"统计交易时出错: {e}")
+    
+    print("="*60)
     
     # 绘制回测结果
     print("\n绘制回测结果...")
