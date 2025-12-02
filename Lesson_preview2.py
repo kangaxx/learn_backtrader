@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import datetime
 import matplotlib.pyplot as plt
+import platform
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
 plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 
@@ -63,8 +64,19 @@ def get_rb_index_data(start_date='20200101', end_date=None):
                 'vol': 'volume'
             })
             
-            # 将日期列转换为datetime格式
-            df['date'] = pd.to_datetime(df['date'])
+            # 处理日期格式
+            # 尝试将日期字符串解析为YYYYMMDD格式
+            try:
+                # 检查第一个日期值是否为8位数字格式
+                first_date = str(df['date'].iloc[0])
+                if len(first_date) == 8 and first_date.isdigit():
+                    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+                else:
+                    # 尝试自动解析其他格式
+                    df['date'] = pd.to_datetime(df['date'])
+            except:
+                # 如果解析失败，使用自动解析
+                df['date'] = pd.to_datetime(df['date'])
             
             # 按照日期排序
             df = df.sort_values('date')
@@ -124,8 +136,20 @@ def get_rb_index_data(start_date='20200101', end_date=None):
             print(f"本地CSV文件缺少必要的列: {missing_cols}")
             return None
         
-        # 将日期列转换为datetime格式
-        df['date'] = pd.to_datetime(df['date'])
+        # 特别处理trade_date列，确保使用正确的日期格式解析YYYYMMDD
+        if 'date' in df.columns and len(df) > 0:
+            # 尝试将日期字符串解析为YYYYMMDD格式
+            try:
+                # 检查第一个日期值是否为8位数字格式
+                first_date = str(df['date'].iloc[0])
+                if len(first_date) == 8 and first_date.isdigit():
+                    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+                else:
+                    # 尝试自动解析其他格式
+                    df['date'] = pd.to_datetime(df['date'])
+            except:
+                # 如果解析失败，使用自动解析
+                df['date'] = pd.to_datetime(df['date'])
         
         # 如果没有volume列，添加一个默认值
         if 'volume' not in df.columns:
@@ -388,13 +412,17 @@ def main():
     
     print("="*60)
     
-    # 绘制回测结果
-    print("\n绘制回测结果...")
-    try:
-        cerebro.plot(style='line', figsize=(12, 8))
-    except Exception as e:
-        print(f"绘图时出现错误: {e}")
-        print("跳过绘图步骤，但回测数据已计算完成")
+    # 根据操作系统决定是否绘制回测结果
+    current_os = platform.system().lower()
+    if 'linux' in current_os:
+        print("\n当前系统为Linux，跳过绘图步骤以避免显示问题")
+    else:
+        print("\n绘制回测结果...")
+        try:
+            cerebro.plot(style='line', figsize=(12, 8))
+        except Exception as e:
+            print(f"绘图时出现错误: {e}")
+            print("跳过绘图步骤，但回测数据已计算完成")
 
 if __name__ == '__main__':
     main()
