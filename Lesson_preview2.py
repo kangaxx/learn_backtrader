@@ -172,14 +172,19 @@ class SmaCrossStrategy(bt.Strategy):
     params = (
         ('sma1', 5),    # 短期均线周期
         ('sma2', 20),   # 长期均线周期
+        ('take_profit_pct', 0.03),  # 初始止盈百分比 (3%)
+        ('trailing_profit_pct', 0.01),  # 移动止盈百分比 (1%)
     )
     
     def __init__(self):
         # 初始化日志
         self.log = self._log
         
-        # 跟踪订单
+        # 跟踪订单和持仓信息
         self.order = None
+        self.entry_price = None  # 入场价格
+        self.take_profit_price = None  # 当前止盈价格
+        self.max_price = None  # 入场后的最高价
         
         # 创建两个移动平均线指标
         self.sma1 = bt.indicators.SimpleMovingAverage(
@@ -191,6 +196,53 @@ class SmaCrossStrategy(bt.Strategy):
         
         # 交叉信号
         self.crossover = bt.indicators.CrossOver(self.sma1, self.sma2)
+    
+    def update_trailing_profit(self):
+        """更新动态止盈价格"""
+        if not self.position:
+            return
+            
+        current_high = self.datas[0].high[0]
+        current_close = self.datas[0].close[0]
+        
+        # 更新入场后的最高价
+        if self.max_price is None or current_high > self.max_price:
+            self.max_price = current_high
+            
+            # 只有当价格已经达到或超过初始止盈价时，才更新移动止盈价格
+            if self.max_price >= self.entry_price * (1 + self.params.take_profit_pct):
+                new_take_profit = self.max_price * (1 - self.params.trailing_profit_pct)
+                if new_take_profit > self.take_profit_price:
+                    self.take_profit_price = new_take_profit
+                    # 记录第一次达到止盈的标志
+                    if not hasattr(self, 'profit_triggered'):
+                        self.profit_triggered = True
+                    # 打印止盈更新信息（可选）
+                    # self.log(f"移动止盈更新: 最高价={self.max_price:.2f}, 止盈价={self.take_profit_price:.2f}")
+    
+    def check_take_profit(self):
+        """检查是否达到止盈条件"""
+        if not self.position or self.take_profit_price is None:
+            return False
+            
+        # 只有当价格已经触发过止盈条件（达到或超过初始止盈价）后，才考虑回落卖出
+        if not hasattr(self, 'profit_triggered'):
+            # 检查是否首次达到初始止盈价
+            if (self.datas[0].high[0] >= self.take_profit_price or 
+                self.datas[0].close[0] >= self.take_profit_price):
+                self.profit_triggered = True
+                self.log(f"触发初始止盈: 当前价={self.datas[0].close[0]:.2f}, 止盈价={self.take_profit_price:.2f}")
+                # 首次达到止盈价时不卖出，继续持有以跟踪更大利润
+                return False
+            return False
+        
+        # 已经触发过止盈，当价格回落到止盈价以下时卖出
+        current_close = self.datas[0].close[0]
+        current_low = self.datas[0].low[0]
+        
+        if current_close <= self.take_profit_price or current_low <= self.take_profit_price:
+            return True
+        return False
     
     def _log(self, txt, dt=None):
         """记录策略日志"""
@@ -204,7 +256,18 @@ class SmaCrossStrategy(bt.Strategy):
                     dt = f"Bar#{len(self)}"
             except:
                 dt = f"Bar#{len(self)}"
-        print(f'{dt}, {txt}')
+        
+        # 获取当前Bar的四个价格
+        try:
+            open_price = self.datas[0].open[0]
+            high_price = self.datas[0].high[0]
+            low_price = self.datas[0].low[0]
+            close_price = self.datas[0].close[0]
+            price_info = f"O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}"
+        except:
+            price_info = "价格信息不可用"
+            
+        print(f'{dt}, {price_info}, {txt}')
     
     def notify_order(self, order):
         """订单通知"""
@@ -217,15 +280,28 @@ class SmaCrossStrategy(bt.Strategy):
         
         # 检查订单是否已完成
         if order.status in [order.Completed]:
-            # 对于买入订单，记录当前的bar索引作为标识
+            # 对于买入订单，记录入场价格和初始化止盈
             if order.isbuy():
                 self.trade_entry_bar = len(self)
-                self.log(f'买入: 价格={order.executed.price:.2f}, 成本={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}')
+                self.entry_price = order.executed.price
+                # 设置初始止盈价格
+                self.take_profit_price = self.entry_price * (1 + self.params.take_profit_pct)
+                self.max_price = self.entry_price
+                # 重置止盈触发标志
+                if hasattr(self, 'profit_triggered'):
+                    delattr(self, 'profit_triggered')
+                self.log(f'买入: 成交价={order.executed.price:.2f}, 成本={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}')
+                self.log(f'初始止盈: {self.take_profit_price:.2f} (上涨{self.params.take_profit_pct*100:.1f}%)')
             elif order.issell():
                 # 检查是否为当日平仓（通过比较bar索引差值）
-                # 在日线数据中，当日内交易通常发生在同一个bar或相邻的bar
                 is_same_day_close = hasattr(self, 'trade_entry_bar') and (len(self) - self.trade_entry_bar) <= 1
-                self.log(f'卖出: 价格={order.executed.price:.2f}, 收入={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}, 当日平仓={is_same_day_close}')
+                # 重置止盈相关变量
+                self.entry_price = None
+                self.take_profit_price = None
+                self.max_price = None
+                if hasattr(self, 'profit_triggered'):
+                    delattr(self, 'profit_triggered')
+                self.log(f'卖出: 成交价={order.executed.price:.2f}, 收入={order.executed.value:.2f}, 佣金={order.executed.comm:.2f}, 当日平仓={is_same_day_close}')
             
             # 记录订单完成的时间
             self.bar_executed = len(self)
@@ -233,6 +309,12 @@ class SmaCrossStrategy(bt.Strategy):
         # 如果订单被取消、拒绝或保证金不足
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log('订单被取消/拒绝/保证金不足')
+            # 重置止盈相关变量
+            self.entry_price = None
+            self.take_profit_price = None
+            self.max_price = None
+            if hasattr(self, 'profit_triggered'):
+                delattr(self, 'profit_triggered')
         
         # 重置订单
         self.order = None
@@ -259,8 +341,23 @@ class SmaCrossStrategy(bt.Strategy):
         # 输出交易信息，使用清晰的格式
         trade_type = "当日平仓" if is_same_day_trade else "非当日平仓"
         print(f"{'='*60}")
-        print(f"交易完成 - {trade_type}")
-        print(f"Bar: {len(self)}")
+        # 获取交易结束日期
+        try:
+            end_date = self.datas[0].datetime.date(0)
+            print(f"交易完成 - {trade_type} (日期: {end_date})")
+        except:
+            print(f"交易完成 - {trade_type} (Bar: {len(self)})")
+        
+        # 获取当前Bar的四个价格
+        try:
+            open_price = self.datas[0].open[0]
+            high_price = self.datas[0].high[0]
+            low_price = self.datas[0].low[0]
+            close_price = self.datas[0].close[0]
+            print(f"Bar: {len(self)}, 价格: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}")
+        except:
+            print(f"Bar: {len(self)}, 价格信息不可用")
+            
         print(f"毛利润: {trade.pnl:.2f}")
         print(f"佣金: {actual_commission:.2f}")
         print(f"净利润: {adjusted_pnlcomm:.2f}")
@@ -279,18 +376,56 @@ class SmaCrossStrategy(bt.Strategy):
         # 获取当前bar索引作为标识
         bar_id = f"Bar#{len(self)}"
         
+        # 获取当前日期
+        try:
+            dt = self.datas[0].datetime.date(0)
+            if dt.year == 1970:
+                dt = f"Bar#{len(self)}"
+        except:
+            dt = f"Bar#{len(self)}"
+        
         # 检查当前是否持仓
         if not self.position:
             # 没有持仓，检查是否有买入信号（短期均线上穿长期均线）
             if self.crossover > 0:
+                # 获取当前Bar的四个价格
+                open_price = self.datas[0].open[0]
+                high_price = self.datas[0].high[0]
+                low_price = self.datas[0].low[0]
+                close_price = self.datas[0].close[0]
+                
                 print(f"\n{bar_id} - 买入信号")
+                print(f"日期: {dt}, 价格: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}")
                 print(f"SMA{self.params.sma1}: {self.sma1[0]:.2f} > SMA{self.params.sma2}: {self.sma2[0]:.2f} (上穿)")
                 # 买入
                 self.order = self.buy()
         else:
-            # 有持仓，检查是否有卖出信号（短期均线下穿长期均线）
-            if self.crossover < 0:
+            # 有持仓，先更新动态止盈
+            self.update_trailing_profit()
+            
+            # 检查是否达到止盈条件
+            if self.check_take_profit():
+                # 获取当前Bar的四个价格
+                open_price = self.datas[0].open[0]
+                high_price = self.datas[0].high[0]
+                low_price = self.datas[0].low[0]
+                close_price = self.datas[0].close[0]
+                
+                print(f"\n{bar_id} - 止盈信号")
+                print(f"日期: {dt}, 价格: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}")
+                print(f"当前价={close_price:.2f}, 跌破止盈价={self.take_profit_price:.2f}")
+                # 止盈卖出
+                self.order = self.sell()
+            # 检查是否有卖出信号（短期均线下穿长期均线）
+            elif self.crossover < 0:
+                # 获取当前Bar的四个价格
+                open_price = self.datas[0].open[0]
+                high_price = self.datas[0].high[0]
+                low_price = self.datas[0].low[0]
+                close_price = self.datas[0].close[0]
+                
                 print(f"\n{bar_id} - 卖出信号")
+                print(f"日期: {dt}, 价格: O={open_price:.2f}, H={high_price:.2f}, L={low_price:.2f}, C={close_price:.2f}")
                 print(f"SMA{self.params.sma1}: {self.sma1[0]:.2f} < SMA{self.params.sma2}: {self.sma2[0]:.2f} (下穿)")
                 # 卖出
                 self.order = self.sell()
