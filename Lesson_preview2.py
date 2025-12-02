@@ -161,7 +161,20 @@ def get_rb_index_data(start_date='20200101', end_date=None):
         # 设置索引
         df.set_index('date', inplace=True)
         
-        print(f"成功从本地CSV文件获取数据，共{len(df)}条记录")
+        # 应用日期筛选
+        if end_date is None:
+            end_date_dt = datetime.datetime.now()
+        else:
+            # 将字符串格式的end_date转换为datetime
+            end_date_dt = pd.to_datetime(end_date, format='%Y%m%d')
+        
+        # 将字符串格式的start_date转换为datetime
+        start_date_dt = pd.to_datetime(start_date, format='%Y%m%d')
+        
+        # 筛选日期范围内的数据
+        df = df.loc[start_date_dt:end_date_dt]
+        
+        print(f"成功从本地CSV文件获取数据，共{len(df)}条记录，日期范围: {start_date} 至 {end_date or '当前'}")
         return df
     except Exception as e:
         print(f"读取本地CSV文件失败: {e}")
